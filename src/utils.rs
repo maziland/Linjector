@@ -24,7 +24,7 @@ pub fn read_config(name: &str) -> InjectorConfig {
                 "info" => LevelFilter::Info,
                 "warn" => LevelFilter::Warn,
                 "error" => LevelFilter::Error,
-                _ => LevelFilter::Warn, // Defaults to Warn
+                _ => LevelFilter::Info, // Defaults to Info
             }
         }
         None => LevelFilter::Info,
