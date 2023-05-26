@@ -1,3 +1,5 @@
+use std::process::exit;
+
 use log::{self};
 use nix::{
     sys::{ptrace, signal::Signal},
@@ -28,19 +30,28 @@ fn main() {
         log::error!("haven't found a specific process");
         return;
     }
+
     let process = process_instances[0];
     log::info!(
-        "pid: {} --- name: {}",
-        process_instances[0].pid(),
-        process_instances[0].name()
+        "Got name: {} with pid: {}",
+        process_instances[0].name(),
+        process_instances[0].pid()
     );
 
+    // Ptrace attach
     let pid = Pid::from_raw(process.pid().as_u32() as i32);
-    let result = ptrace::attach(pid);
-    result.unwrap_or_else(|error| log::info!("Failed attaching to process, error: {}", error));
+    ptrace::attach(pid).unwrap_or_else(|error| {
+        log::error!("Failed attaching to process, error: {}", error);
+        exit(-1)
+    });
     log::info!("Successfuly attached pid {}", pid);
 
-    let detach = ptrace::detach(pid, Signal::SIGCONT);
-    detach.unwrap_or_else(|error| log::info!("Failed detaching from process, error: {}", error));
+    /*
+        PTRACE LOGIC GOES HERE
+    */
+
+    // Ptrace detach
+    ptrace::detach(pid, Signal::SIGCONT)
+        .unwrap_or_else(|error| log::info!("Failed detaching from process, error: {}", error));
     log::info!("Successfuly detached pid {}", pid);
 }
