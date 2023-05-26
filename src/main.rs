@@ -1,7 +1,4 @@
-use std::collections::HashMap;
-
-use config::{Config, File};
-use log::{self, LevelFilter};
+use log::{self};
 use nix::{
     sys::{ptrace, signal::Signal},
     unistd::Pid,
@@ -9,45 +6,10 @@ use nix::{
 use pretty_env_logger;
 use sysinfo::{PidExt, ProcessExt, System, SystemExt};
 
-struct InjectorConfig {
-    process_name: String,
-    log_level_filter: LevelFilter,
-}
-
-fn read_config(name: &str) -> InjectorConfig {
-    let config = Config::builder()
-        .add_source(File::with_name(&name))
-        .build()
-        .unwrap_or_else(|e| {
-            println!("Error: {}", e);
-            panic!("asd")
-        });
-
-    let hashmap = config.try_deserialize::<HashMap<String, String>>().unwrap();
-    let process_name = hashmap.get("process_name").unwrap().to_string();
-    let log_level_filter = match hashmap.get("log_level_filter") {
-        Some(filter) => {
-            match filter.as_str() {
-                "trace" => LevelFilter::Trace,
-                "debug" => LevelFilter::Debug,
-                "info" => LevelFilter::Info,
-                "warn" => LevelFilter::Warn,
-                "error" => LevelFilter::Error,
-                _ => LevelFilter::Warn, // Defaults to Warn
-            }
-        }
-        None => LevelFilter::Info,
-    };
-
-    InjectorConfig {
-        process_name,
-        log_level_filter,
-    }
-}
-
+mod utils;
 fn main() {
     // Read config file
-    let injector_config = read_config("config");
+    let injector_config = utils::read_config("config");
 
     // Set logger
     pretty_env_logger::formatted_builder()
