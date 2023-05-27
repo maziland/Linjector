@@ -18,6 +18,12 @@ fn main() {
         .filter_level(injector_config.log_level_filter)
         .init();
 
+    log::trace!(
+        "built config with: process_name: '{}', log_level_filter: {}",
+        injector_config.process_name,
+        injector_config.log_level_filter
+    );
+
     // Find process instances
     let system = System::new_all();
     let process_instances = system
@@ -26,14 +32,15 @@ fn main() {
         .collect::<Vec<_>>();
 
     // Verify there's only one
-    if process_instances.len() != 1 {
-        log::error!("haven't found a specific process");
-        return;
+    match process_instances.len() {
+        0  => {log::error!("Process not found!"); exit(-1)},
+        2 => {log::error!("Found more than 1 process for the given name!"); exit(-1)},
+        _ => {} // Gets here if there's 1 - should continue executing
     }
 
     let process = process_instances[0];
     log::info!(
-        "Got name: {} with pid: {}",
+        "Got name: '{}' with pid: {}",
         process_instances[0].name(),
         process_instances[0].pid()
     );
