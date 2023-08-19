@@ -1,2 +1,2 @@
-process_name = "sshd"
+process_name = "tcpdump"
 log_level_filter = "trace"

@@ -10,7 +10,9 @@ config = "0.13.3"
 log = "0.4.17"
 nix = "0.26.2"
 pretty_env_logger = "0.4.0"
+syscalls = "0.4.2"
 sysinfo = "0.29.0"
+thiserror = "1.0.44"
 
 [profile.release]
 strip = true
