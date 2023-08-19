@@ -10,7 +10,7 @@ pub struct InjectorConfig {
 
 pub fn read_config(name: &str) -> InjectorConfig {
     let config = Config::builder()
-        .add_source(File::with_name(&name))
+        .add_source(File::with_name(name))
         .build()
         .unwrap_or_else(|e| panic!("Error: {}", e));
 
