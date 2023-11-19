@@ -9,12 +9,8 @@ edition = "2021"
 config = "0.13.3"
 log = "0.4.17"
 nix = "0.26.2"
-pretty_env_logger = "0.4.0"
-syscalls = "0.4.2"
+pretty_env_logger = "0.5.0"
+syscalls = "0.6.15"
 sysinfo = "0.29.0"
-thiserror = "1.0.44"
-
-[profile.release]
-strip = true
-opt-level = "z"
-lto = true
+thiserror = "1.0.11"
+pete = "0.12.0"
