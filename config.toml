@@ -1,2 +1,2 @@
-process_name = "tcpdump"
+process_name = "top"
 log_level_filter = "trace"
