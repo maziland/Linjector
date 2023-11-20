@@ -1,7 +1,6 @@
-use std::{ffi::c_void, mem, process::exit};
-
 use crate::utils::get_pid_from_process_name;
 use log::{self};
+use nix::libc::{MAP_ANONYMOUS, MAP_PRIVATE, PROT_READ, PROT_WRITE};
 use nix::{
     libc::user_regs_struct,
     sys::{
@@ -11,6 +10,8 @@ use nix::{
     },
 };
 use pete::{Ptracer, Tracee};
+use std::{ffi::c_void, mem, process::exit};
+use syscalls::Sysno;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -23,10 +24,12 @@ pub enum DebugeeErr {
     Io(#[from] std::io::Error),
     #[error("Mmap Error `{0:#?}`")]
     MmapBadAddress(u64),
-    #[error("Munmap Error `{0:#?}`")]
+    #[error("Munmap Error `{0:#x?}`")]
     MunmapFailed(u64),
     #[error("Pete Error: `{0:#?}`")]
     PeteError(#[from] pete::Error),
+    #[error("No debugee attached!")]
+    NoDebugeeAttached(),
 }
 
 pub type DebugeeResult<T> = Result<T, DebugeeErr>;
@@ -35,6 +38,12 @@ pub struct Debugee {
     pub process_name: String,
     pub tracee: Option<Tracee>,
     is_attached: bool,
+    memory_allocations: Vec<MemoryAllocation>,
+}
+
+pub struct MemoryAllocation {
+    address: u64,
+    len: u64,
 }
 
 impl Debugee {
@@ -45,6 +54,7 @@ impl Debugee {
             process_name,
             tracee: None,
             is_attached: false,
+            memory_allocations: Vec::new(),
         };
         debugee
     }
@@ -60,11 +70,16 @@ impl Debugee {
 
     pub fn attach(&mut self) {
         let mut ptracer = Ptracer::new();
-        let _ = ptracer.attach(self.pid);
+        log::trace!("Attaching process...");
+        // TODO: fix error return value
+        let _a = ptracer.attach(self.pid);
+        if _a.is_err() {
+            log::trace!("ERR");
+        }
 
         match ptracer.wait() {
             Ok(tracee) => {
-                log::info!("Successfuly attached pid {}", self.pid);
+                log::info!("Successfully attached pid {}", self.pid);
                 self.is_attached = true;
                 self.tracee = tracee;
                 tracee
@@ -81,7 +96,7 @@ impl Debugee {
             // Detach with ptrace
             match ptrace::detach(self.pid, Signal::SIGCONT) {
                 Ok(()) => {
-                    log::info!("Successfuly detached pid {}", self.pid);
+                    log::info!("Successfully detached pid {}", self.pid);
                     self.is_attached = false;
                 }
                 Err(error) => {
@@ -124,6 +139,67 @@ impl Debugee {
             .map_err(DebugeeErr::PeteError)
     }
 
+    pub fn allocate_memory(&mut self, len: u64) -> DebugeeResult<u64> {
+        let mmap_ret_address = &self
+            .syscall(
+                Sysno::mmap,
+                0,                                    // start
+                len,                                  // len
+                (PROT_READ | PROT_WRITE) as u64,      // prot
+                (MAP_PRIVATE | MAP_ANONYMOUS) as u64, // flags
+                0,                                    // fd
+                0,                                    // offset
+            )?
+            .rax;
+
+        if *mmap_ret_address == 0 {
+            log::error!(
+                "Memory allocation failed! mmap return address: {:#018x}",
+                mmap_ret_address
+            );
+            Err(DebugeeErr::MmapBadAddress(*mmap_ret_address))
+        } else {
+            log::trace!("Successfully allocated {} bytes!", len);
+            let mem_alloc = MemoryAllocation {
+                address: *mmap_ret_address,
+                len: len,
+            };
+            self.memory_allocations.push(mem_alloc);
+            Ok(*mmap_ret_address)
+        }
+    }
+
+    pub fn deallocate_memory(&mut self, addr: u64, len: u64) -> DebugeeResult<()> {
+        let munmap_ret_address = &self.syscall(Sysno::munmap, addr, len, 0, 0, 0, 0)?.rax;
+
+        if *munmap_ret_address != 0 {
+            log::error!(
+                "Memory deallocation failed! munmap return address: {}",
+                munmap_ret_address
+            );
+            Err(DebugeeErr::MunmapFailed(*munmap_ret_address))
+        } else {
+            log::trace!("Successfully deallocated {} bytes!", len);
+            // Remove this address from the allocations vector
+            if let Some(index) = self
+                .memory_allocations
+                .iter()
+                .position(|allocation| allocation.address == addr)
+            {
+                self.memory_allocations.swap_remove(index);
+            }
+            Ok(())
+        }
+    }
+
+    pub fn deallocate_all_addresses(&mut self) -> DebugeeResult<()> {
+        let allocations_to_deallocate: Vec<_> = self.memory_allocations.drain(..).collect();
+        for memory_allocation in allocations_to_deallocate.iter() {
+            self.deallocate_memory(memory_allocation.address, memory_allocation.len)?;
+        }
+        Ok(())
+    }
+
     pub fn syscall(
         &mut self,
         syscall: syscalls::Sysno,
@@ -136,7 +212,7 @@ impl Debugee {
     ) -> DebugeeResult<user_regs_struct> {
         if !self.is_attached {
             log::error!("There is no debugee attached");
-            exit(-1);
+            return Err(DebugeeErr::NoDebugeeAttached());
         }
         let syscall_name = syscall.name();
         let syscall_number = syscall.id();
@@ -161,13 +237,11 @@ impl Debugee {
         new_registers.r8 = r8;
         new_registers.r9 = r9;
 
-        ptrace::setregs(self.pid, new_registers).unwrap_or_else(|error| {
-            log::error!("Failed setting new registers, error: {}", error);
-        });
+        ptrace::setregs(self.pid, new_registers)?;
 
-        log::info!("Successfuly changed syscall opcode and registers");
+        log::trace!("Changed opcodes and registers");
         log::trace!(
-            "Executing `{syscall_name}`({syscall_number}) with: {rdi}, {rsi}, {rdx}, {r10}, {r8}, {r9}"
+            "Executing `{syscall_name} ({syscall_number})` with: {rdi}, {rsi}, {rdx}, {r10}, {r8}, {r9}"
         );
         self.single_step()?;
         let result = ptrace::getregs(self.pid)?;
@@ -176,9 +250,9 @@ impl Debugee {
         self.write(original_rip, &original_rip_opcodes)?;
 
         self.get_tracee().set_registers(backup_registers)?;
-        log::info!("Restored opcodes and registers");
+        log::trace!("Restored opcodes and registers");
 
-        log::info!("Syscall return value: {:#?}", result.rax as *mut c_void);
+        log::trace!("Syscall return value: {:#?}", result.rax as *mut c_void);
         Ok(result)
     }
 }
@@ -188,6 +262,7 @@ impl Drop for Debugee {
     fn drop(&mut self) {
         if self.is_attached {
             log::trace!("Dropping debugee");
+            let _ = self.deallocate_all_addresses();
             self.detach();
         }
     }
