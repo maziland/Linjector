@@ -1,6 +1,6 @@
 use crate::utils::get_pid_from_process_name;
 use log::{self};
-use nix::libc::{MAP_ANONYMOUS, MAP_PRIVATE, PROT_READ, PROT_WRITE};
+use nix::libc::{MAP_ANONYMOUS, MAP_PRIVATE, PROT_EXEC, PROT_READ, PROT_WRITE};
 use nix::{
     libc::user_regs_struct,
     sys::{
@@ -24,6 +24,8 @@ pub enum DebugeeErr {
     Io(#[from] std::io::Error),
     #[error("Mmap Error `{0:#?}`")]
     MmapBadAddress(u64),
+    #[error("Mprotect Error")]
+    MprotectFailed(),
     #[error("Munmap Error `{0:#x?}`")]
     MunmapFailed(u64),
     #[error("Pete Error: `{0:#?}`")]
@@ -68,21 +70,18 @@ impl Debugee {
         }
     }
 
-    pub fn attach(&mut self) {
+    pub fn attach(&mut self) -> DebugeeResult<Option<Tracee>> {
         let mut ptracer = Ptracer::new();
         log::trace!("Attaching process...");
         // TODO: fix error return value
-        let _a = ptracer.attach(self.pid);
-        if _a.is_err() {
-            log::trace!("ERR");
-        }
+        ptracer.attach(self.pid)?;
 
         match ptracer.wait() {
             Ok(tracee) => {
                 log::info!("Successfully attached pid {}", self.pid);
                 self.is_attached = true;
                 self.tracee = tracee;
-                tracee
+                return Ok(tracee);
             }
             _ => {
                 log::error!("Failed attaching to process");
@@ -139,7 +138,7 @@ impl Debugee {
             .map_err(DebugeeErr::PeteError)
     }
 
-    pub fn allocate_memory(&mut self, len: u64) -> DebugeeResult<u64> {
+    pub fn allocate_memory(&mut self, len: u64, executable: bool) -> DebugeeResult<u64> {
         let mmap_ret_address = &self
             .syscall(
                 Sysno::mmap,
@@ -162,14 +161,41 @@ impl Debugee {
             log::trace!("Successfully allocated {} bytes!", len);
             let mem_alloc = MemoryAllocation {
                 address: *mmap_ret_address,
-                len: len,
+                len,
             };
             self.memory_allocations.push(mem_alloc);
+            if executable {
+                self.make_memory_executable(*mmap_ret_address, len)?;
+            }
             Ok(*mmap_ret_address)
         }
     }
 
+    fn make_memory_executable(&mut self, addr: u64, len: u64) -> DebugeeResult<()> {
+        // Makes the memory address executable and unwritable
+        let mprotect_ret_address = &self
+            .syscall(
+                Sysno::mprotect,
+                addr,                           // address
+                len,                            // len
+                (PROT_READ | PROT_EXEC) as u64, // prot
+                0,
+                0,
+                0,
+            )?
+            .rax;
+
+        if *mprotect_ret_address != 0 {
+            log::error!("mprotect failed!");
+            Err(DebugeeErr::MprotectFailed())
+        } else {
+            log::trace!("mprotect as exec successfull");
+            Ok(())
+        }
+    }
+
     pub fn deallocate_memory(&mut self, addr: u64, len: u64) -> DebugeeResult<()> {
+        log::trace!("Deallocating address {:#x?}", addr);
         let munmap_ret_address = &self.syscall(Sysno::munmap, addr, len, 0, 0, 0, 0)?.rax;
 
         if *munmap_ret_address != 0 {
@@ -193,6 +219,7 @@ impl Debugee {
     }
 
     pub fn deallocate_all_addresses(&mut self) -> DebugeeResult<()> {
+        log::trace!("Deallocating all addresses");
         let allocations_to_deallocate: Vec<_> = self.memory_allocations.drain(..).collect();
         for memory_allocation in allocations_to_deallocate.iter() {
             self.deallocate_memory(memory_allocation.address, memory_allocation.len)?;
@@ -223,7 +250,6 @@ impl Debugee {
         let original_rip_opcodes = self.read(original_rip, mem::size_of::<u64>())?;
 
         // Write our syscall opcode to RIP
-        // let syscall_opcode = u16::from_le_bytes([0x0F, 0x05]);
         let syscall_opcode: &[u8] = &[0x0F, 0x05];
         self.write(original_rip, &syscall_opcode)?;
 
@@ -250,10 +276,38 @@ impl Debugee {
         self.write(original_rip, &original_rip_opcodes)?;
 
         self.get_tracee().set_registers(backup_registers)?;
-        log::trace!("Restored opcodes and registers");
 
         log::trace!("Syscall return value: {:#?}", result.rax as *mut c_void);
         Ok(result)
+    }
+
+    pub fn call_shellcode(&mut self, address: u64) -> DebugeeResult<()> {
+        // TODO: figure out how to continue the program properly from the shellcode instead of manually stepping
+
+        // Backup registers and RIP
+        let backup_registers = self.get_tracee().registers()?;
+        let original_rip = backup_registers.rip;
+        let original_rip_opcodes = self.read(original_rip, mem::size_of::<u64>())?;
+
+        // Set RAX to address and then execute `call rax`
+        let mut new_registers = backup_registers;
+        new_registers.rax = address;
+        ptrace::setregs(self.pid, new_registers)?;
+        let call_rax = b"\xff\xd0";
+        self.write(original_rip, call_rax)?;
+
+        log::trace!("Calling shellcode!");
+        self.single_step()?;
+        let new_rip = self.get_tracee().registers()?.rip;
+        log::info!("RIP after step is: {:#018x}", new_rip);
+        self.single_step()?;
+        let new_rip = self.get_tracee().registers()?.rip;
+        log::info!("RIP after step is: {:#018x}", new_rip);
+
+        // Restore original instructions, and original registers to continue normal program control flow
+        self.write(original_rip, &original_rip_opcodes)?;
+        self.get_tracee().set_registers(backup_registers)?;
+        Ok(())
     }
 }
 

